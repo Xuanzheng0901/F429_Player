@@ -23,8 +23,10 @@
 #define SD_TREE_NAME_UTF8_SIZE         192U
 #define SD_TREE_LINE_SIZE              256U
 
-static const TCHAR s_sd_volume[] = {(TCHAR)'0', (TCHAR)':', 0};
-static TCHAR s_tree_path[SD_TREE_PATH_CAPACITY] = {(TCHAR)'0', (TCHAR)':', (TCHAR)'/', 0};
+static const TCHAR s_sd_volume[] = {(TCHAR)'S', (TCHAR)'D', (TCHAR)':', 0};
+static TCHAR s_tree_path[SD_TREE_PATH_CAPACITY] = {
+    (TCHAR)'S', (TCHAR)'D', (TCHAR)':', (TCHAR)'/', 0
+};
 static DIR s_directory_stack[SD_TREE_MAX_DEPTH];
 static FILINFO s_file_info_stack[SD_TREE_MAX_DEPTH];
 static bool s_tree_last_entry_stack[SD_TREE_MAX_DEPTH];
@@ -314,7 +316,7 @@ static void print_sd_card_tree(void)
         return;
     }
 
-    LOGI("SD", "0:/");
+    LOGI("SD", "SD:/");
     result = print_directory_tree(s_tree_path, SD_TREE_PATH_CAPACITY, 0U);
     if(result == FR_OK)
         LOGI("SD", "Directory tree completed");
