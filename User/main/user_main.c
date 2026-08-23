@@ -7,8 +7,11 @@
 static void led_blink_task(void* pvParameter)
 {
     LOGI("LED", "Stack addr: %p", xTaskGetCurrentTaskHandle());
-    HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
-    vTaskDelay(500);
+    while(1)
+    {
+        HAL_GPIO_TogglePin(LED_B_GPIO_Port, LED_B_Pin);
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
 }
 
 void app_main(void)
