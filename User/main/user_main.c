@@ -1,8 +1,8 @@
-#include "ff.h"
 #include "FreeRTOS.h"
 #include "main.h"
 #include "task.h"
 #include "LOG.h"
+#include "sd_card.h"
 
 static void led_blink_task(void* pvParameter)
 {
@@ -18,7 +18,5 @@ void app_main(void)
 {
     log_init(LOG_INFO);
     xTaskCreate(led_blink_task, "LED", 512, NULL, 15, NULL);
-
-    vTaskDelay(100);
-
+    sd_card_tree_test_start();
 }
