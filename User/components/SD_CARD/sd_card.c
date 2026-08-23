@@ -21,12 +21,13 @@
 #define SD_TREE_MAX_DEPTH              8U
 #define SD_TREE_PATH_CAPACITY          512U
 #define SD_TREE_NAME_UTF8_SIZE         192U
-#define SD_TREE_LINE_SIZE              224U
+#define SD_TREE_LINE_SIZE              256U
 
 static const TCHAR s_sd_volume[] = {(TCHAR)'0', (TCHAR)':', 0};
 static TCHAR s_tree_path[SD_TREE_PATH_CAPACITY] = {(TCHAR)'0', (TCHAR)':', (TCHAR)'/', 0};
 static DIR s_directory_stack[SD_TREE_MAX_DEPTH];
 static FILINFO s_file_info_stack[SD_TREE_MAX_DEPTH];
+static bool s_tree_last_entry_stack[SD_TREE_MAX_DEPTH];
 static TaskHandle_t s_sd_card_task_handle = NULL;
 
 static size_t tchar_length(const TCHAR *text)
@@ -124,7 +125,18 @@ static bool is_dot_entry(const TCHAR *name)
     return name[1] == 0 || (name[1] == (TCHAR)'.' && name[2] == 0);
 }
 
-static void log_tree_entry(const FILINFO *file_info, uint32_t depth)
+static bool append_tree_text(char *line, size_t capacity, size_t *offset, const char *text)
+{
+    const size_t text_length = strlen(text);
+    if(*offset + text_length >= capacity)
+        return false;
+
+    memcpy(&line[*offset], text, text_length);
+    *offset += text_length;
+    return true;
+}
+
+static void log_tree_entry(const FILINFO *file_info, uint32_t depth, bool is_last_entry)
 {
     char name_utf8[SD_TREE_NAME_UTF8_SIZE];
     char line[SD_TREE_LINE_SIZE];
@@ -132,21 +144,16 @@ static void log_tree_entry(const FILINFO *file_info, uint32_t depth)
 
     tchar_to_utf8(file_info->fname, name_utf8, sizeof(name_utf8));
 
-    for(uint32_t index = 0; index < depth && offset + 4U < sizeof(line); index++)
-    {
-        memcpy(&line[offset], "|   ", 4U);
-        offset += 4U;
-    }
+    for(uint32_t index = 0; index < depth; index++)
+        (void)append_tree_text(line, sizeof(line), &offset,
+                               s_tree_last_entry_stack[index] ? "    " : "│   ");
+
+    (void)append_tree_text(line, sizeof(line), &offset, is_last_entry ? "└── " : "├── ");
 
     if(file_info->fattrib & AM_DIR)
-    {
-        (void)snprintf(&line[offset], sizeof(line) - offset, "|-- [D] %s/", name_utf8);
-    }
+        (void)snprintf(&line[offset], sizeof(line) - offset, "%s/", name_utf8);
     else
-    {
-        (void)snprintf(&line[offset], sizeof(line) - offset, "|-- [F] %s (%lu bytes)",
-                       name_utf8, (unsigned long)file_info->fsize);
-    }
+        (void)snprintf(&line[offset], sizeof(line) - offset, "%s", name_utf8);
 
     LOGI("SD", "%s", line);
 }
@@ -173,6 +180,42 @@ static bool append_directory_to_path(TCHAR *path, size_t capacity, const TCHAR *
     return true;
 }
 
+static FRESULT read_next_tree_entry(DIR *directory, FILINFO *file_info)
+{
+    FRESULT result;
+
+    do
+    {
+        vTaskDelay(10);
+        result = f_readdir(directory, file_info);
+        if(result != FR_OK || file_info->fname[0] == 0)
+            return result;
+    } while(is_dot_entry(file_info->fname));
+
+    return FR_OK;
+}
+
+static FRESULT count_tree_entries(DIR *directory, FILINFO *file_info, uint32_t *entry_count)
+{
+    FRESULT result;
+    *entry_count = 0U;
+
+    while(true)
+    {
+        result = f_readdir(directory, file_info);
+        if(result != FR_OK || file_info->fname[0] == 0)
+            break;
+
+        if(!is_dot_entry(file_info->fname))
+            (*entry_count)++;
+    }
+
+    if(result == FR_OK)
+        result = f_readdir(directory, NULL);
+
+    return result;
+}
+
 static FRESULT print_directory_tree(TCHAR *path, size_t capacity, uint32_t depth)
 {
     DIR *directory = &s_directory_stack[depth];
@@ -182,36 +225,43 @@ static FRESULT print_directory_tree(TCHAR *path, size_t capacity, uint32_t depth
     if(result != FR_OK)
         return result;
 
-    while(true)
+    uint32_t entry_count;
+    result = count_tree_entries(directory, file_info, &entry_count);
+
+    uint32_t entry_index = 0U;
+    while(result == FR_OK)
     {
-        result = f_readdir(directory, file_info);
+        result = read_next_tree_entry(directory, file_info);
         if(result != FR_OK || file_info->fname[0] == 0)
             break;
 
-        if(is_dot_entry(file_info->fname))
-            continue;
+        entry_index++;
+        const bool is_last_entry = entry_index == entry_count;
 
-        log_tree_entry(file_info, depth);
+        log_tree_entry(file_info, depth, is_last_entry);
 
         if(file_info->fattrib & AM_DIR)
         {
             if(depth + 1U >= SD_TREE_MAX_DEPTH)
             {
                 LOGW("SD", "Directory depth limit reached: %lu", (unsigned long)SD_TREE_MAX_DEPTH);
-                continue;
             }
-
-            size_t original_length;
-            if(!append_directory_to_path(path, capacity, file_info->fname, &original_length))
+            else
             {
-                LOGW("SD", "Directory path is too long, skipping subtree");
-                continue;
+                size_t original_length;
+                if(!append_directory_to_path(path, capacity, file_info->fname, &original_length))
+                {
+                    LOGW("SD", "Directory path is too long, skipping subtree");
+                }
+                else
+                {
+                    s_tree_last_entry_stack[depth] = is_last_entry;
+                    const FRESULT child_result = print_directory_tree(path, capacity, depth + 1U);
+                    path[original_length] = 0;
+                    if(child_result != FR_OK)
+                        LOGE("SD", "Failed to read subdirectory, FatFs=%d", (int)child_result);
+                }
             }
-
-            const FRESULT child_result = print_directory_tree(path, capacity, depth + 1U);
-            path[original_length] = 0;
-            if(child_result != FR_OK)
-                LOGE("SD", "Failed to read subdirectory, FatFs=%d", (int)child_result);
         }
     }
 
