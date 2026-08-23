@@ -153,7 +153,7 @@ static bool append_directory_to_path(TCHAR *path, size_t capacity, const TCHAR *
     const size_t path_length = tchar_length(path);
     const size_t name_length = tchar_length(directory_name);
     const bool needs_separator = path_length > 0U && path[path_length - 1U] != (TCHAR)'/';
-    const size_t required_length = path_length + (needs_separator ? 1U : 0U) + name_length + 2U;
+    const size_t required_length = path_length + (needs_separator ? 1U : 0U) + name_length + 1U;
 
     if(required_length > capacity)
         return false;
@@ -165,7 +165,6 @@ static bool append_directory_to_path(TCHAR *path, size_t capacity, const TCHAR *
 
     memcpy(&path[offset], directory_name, name_length * sizeof(TCHAR));
     offset += name_length;
-    path[offset++] = (TCHAR)'/';
     path[offset] = 0;
     return true;
 }
@@ -228,7 +227,7 @@ static void sd_card_tree_test_task(void *argument)
 
     if(BSP_SD_IsDetected() != SD_PRESENT)
     {
-        LOGW("SD", "No SD card detected, PB9 should be low after insertion");
+        LOGW("SD", "No SD card detected, PG14 should be low after insertion");
         vTaskDelete(NULL);
     }
 
