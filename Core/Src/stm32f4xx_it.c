@@ -51,6 +51,29 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+void HardFault_HandlerC(uint32_t *hardfault_args)
+{
+  uint32_t stacked_r0 = hardfault_args[0];
+  uint32_t stacked_r1 = hardfault_args[1];
+  uint32_t stacked_r2 = hardfault_args[2];
+  uint32_t stacked_r3 = hardfault_args[3];
+  uint32_t stacked_r12 = hardfault_args[4];
+  uint32_t stacked_lr = hardfault_args[5];
+  uint32_t stacked_pc = hardfault_args[6];
+  uint32_t stacked_psr = hardfault_args[7];
+
+  printf("HardFault:\n");
+  printf(" R0  = 0x%08lX\n", stacked_r0);
+  printf(" R1  = 0x%08lX\n", stacked_r1);
+  printf(" R2  = 0x%08lX\n", stacked_r2);
+  printf(" R3  = 0x%08lX\n", stacked_r3);
+  printf(" R12 = 0x%08lX\n", stacked_r12);
+  printf(" LR  = 0x%08lX\n", stacked_lr);
+  printf(" PC  = 0x%08lX\n", stacked_pc);
+  printf(" PSR = 0x%08lX\n", stacked_psr);
+
+  while(1);
+}
 
 /* USER CODE END 0 */
 
@@ -92,7 +115,14 @@ void NMI_Handler(void)
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
-
+  __asm volatile
+  (
+    "TST lr, #4\n"
+    "ITE EQ\n"
+    "MRSEQ r0, MSP\n"
+    "MRSNE r0, PSP\n"
+    "B HardFault_HandlerC\n"
+  );
   /* USER CODE END HardFault_IRQn 0 */
   while (1)
   {
