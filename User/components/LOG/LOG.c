@@ -13,8 +13,6 @@
 
 #define LOG_MEM_POOL_SIZE   16
 
-#define LOG_UART &huart1
-
 static log_level_t s_log_level = LOG_VERBOSE;
 
 static xQueueHandle log_queue = NULL;   //业务代码发送日志的接口
@@ -23,14 +21,6 @@ static xSemaphoreHandle log_uart_sem = NULL;   //USART/DMA信号量
 static TaskHandle_t log_task_handle = NULL;
 
 static log_data_t log_mem_pool[LOG_MEM_POOL_SIZE];
-
-void log_free_buffer(log_data_t *buffer)
-{
-    if(buffer != NULL && log_mem_pool_queue != NULL)
-    {
-        xQueueSend(log_mem_pool_queue, &buffer, 0);
-    }
-}
 
 static uint32_t get_time_ms(void)
 {
@@ -102,38 +92,6 @@ void log_set_level(log_level_t level)
     s_log_level = level;
 }
 
-log_data_t *log_alloc_buffer(void)
-{
-    log_data_t *buffer = NULL;
-
-    if(log_mem_pool_queue == NULL || xQueueReceive(log_mem_pool_queue, &buffer, 0) != pdTRUE)
-        return NULL;
-
-    buffer->len = 0;
-    buffer->data[0] = '\0';
-    return buffer;
-}
-
-bool log_send_buffer(log_data_t *buffer)
-{
-    if(buffer == NULL)
-        return false;
-
-    if(log_queue == NULL || buffer->len == 0 || buffer->len > LOG_RAW_MAX_LEN)
-    {
-        log_free_buffer(buffer);
-        return false;
-    }
-
-    if(xQueueSend(log_queue, &buffer, 0) != pdTRUE)
-    {
-        log_free_buffer(buffer);
-        return false;
-    }
-
-    return true;
-}
-
 void log_write(log_level_t level, const char *tag, const char *format, ...)
 {
     if(level > s_log_level || log_queue == NULL)
@@ -143,8 +101,9 @@ void log_write(log_level_t level, const char *tag, const char *format, ...)
     char level_char;
     log_get_level_info(level, &level_char, &color);
 
-    log_data_t *log_buffer = log_alloc_buffer();
-    if(log_buffer == NULL)
+    log_data_t *log_buffer = NULL;
+
+    if(xQueueReceive(log_mem_pool_queue, &log_buffer, 0) != pdTRUE)
         return;
 
     uint32_t ts = get_time_ms();
@@ -153,33 +112,36 @@ void log_write(log_level_t level, const char *tag, const char *format, ...)
     log_buffer->len = log_format_message(log_buffer->data, color, level_char, ts, tag, format, args);
     va_end(args);
 
-    log_send_buffer(log_buffer);
+    if(xQueueSend(log_queue, &log_buffer, 0) != pdTRUE)
+    {
+        xQueueSend(log_mem_pool_queue, &log_buffer, 0);
+    }
 }
 
 void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
 {
     static BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-    if(huart == LOG_UART)
+    if(huart == &huart1)
     {
         vTaskNotifyGiveFromISR(log_task_handle, &xHigherPriorityTaskWoken);  //中断中通知发送任务
     }
 }
 
-static void log_send_task(void *args)
+void log_send_task(void *args)
 {
     log_data_t *recv_buf_ptr = NULL;
     while(1)
     {
         if(xQueueReceive(log_queue, &recv_buf_ptr, portMAX_DELAY) == pdTRUE)  //等待日志
         {
-            if(HAL_UART_Transmit_DMA(LOG_UART, (const uint8_t *)recv_buf_ptr->data, recv_buf_ptr->len) != HAL_OK)
+            if(HAL_UART_Transmit_DMA(&huart1, (const uint8_t *)recv_buf_ptr->data, recv_buf_ptr->len) != HAL_OK)
             {
                 // 如果失败，手动释放内存并继续循环，否则会死锁
-                log_free_buffer(recv_buf_ptr);
+                xQueueSend(log_mem_pool_queue, &recv_buf_ptr, 0);
                 continue;
             }
             ulTaskNotifyTake(pdTRUE, portMAX_DELAY); //等待DMA传输完成
-            log_free_buffer(recv_buf_ptr);  //完成后释放内存块
+            xQueueSend(log_mem_pool_queue, &recv_buf_ptr, 0);  //完成后释放内存块
         }
     }
 }

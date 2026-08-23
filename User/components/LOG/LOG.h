@@ -6,7 +6,6 @@
 
 #ifndef G474_1_LOG_H
 #define G474_1_LOG_H
-#include <stdbool.h>
 #include <stdint.h>
 
 #define LOG_RAW_MAX_LEN 253
@@ -28,27 +27,6 @@ typedef struct {
 void log_init(log_level_t level);
 
 void log_set_level(log_level_t level);
-
-/**
- * @brief 从日志内存池获取一个发送缓冲区。
- * @return 成功时返回缓冲区指针，内存池为空或日志服务未初始化时返回NULL。
- * @note 仅可在任务上下文调用，接口不会阻塞。
- */
-log_data_t *log_alloc_buffer(void);
-
-/**
- * @brief 归还一个尚未提交的发送缓冲区。
- * @param buffer 由log_alloc_buffer()获取且尚未提交的缓冲区。
- */
-void log_free_buffer(log_data_t *buffer);
-
-/**
- * @brief 将缓冲区提交给日志发送任务。
- * @param buffer 由log_alloc_buffer()获取的缓冲区，提交前需填写data和len。
- * @return 成功入队返回true，参数无效或发送队列不可用时返回false。
- * @note 调用后缓冲区的所有权均由日志模块接管，调用方不得继续访问。
- */
-bool log_send_buffer(log_data_t *buffer);
 
 void log_write(log_level_t level, const char *tag, const char *format, ...);
 
