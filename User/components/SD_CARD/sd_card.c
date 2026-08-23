@@ -246,14 +246,14 @@ static FRESULT print_directory_tree(TCHAR *path, size_t capacity, uint32_t depth
         {
             if(depth + 1U >= SD_TREE_MAX_DEPTH)
             {
-                LOGW("SD", "Directory depth limit reached: %lu", (unsigned long)SD_TREE_MAX_DEPTH);
+                LOGW("SD", "目录深度已达到上限: %lu", (unsigned long)SD_TREE_MAX_DEPTH);
             }
             else
             {
                 size_t original_length;
                 if(!append_directory_to_path(path, capacity, file_info->fname, &original_length))
                 {
-                    LOGW("SD", "Directory path is too long, skipping subtree");
+                    LOGW("SD", "目录路径过长, 跳过该子目录");
                 }
                 else
                 {
@@ -261,7 +261,7 @@ static FRESULT print_directory_tree(TCHAR *path, size_t capacity, uint32_t depth
                     const FRESULT child_result = print_directory_tree(path, capacity, depth + 1U);
                     path[original_length] = 0;
                     if(child_result != FR_OK)
-                        LOGE("SD", "Failed to read subdirectory, FatFs=%d", (int)child_result);
+                        LOGE("SD", "读取子目录失败, FatFs=%d", (int)child_result);
                 }
             }
         }
@@ -274,7 +274,7 @@ static FRESULT print_directory_tree(TCHAR *path, size_t capacity, uint32_t depth
 static void reset_sd_card_storage(void)
 {
     if(HAL_SD_DeInit(&hsd) != HAL_OK)
-        LOGW("SD", "HAL SD deinitialization failed");
+        LOGW("SD", "HAL SD反初始化失败");
 
     // // The generated MSP deinitialization only disables the SDIO clock.
     // // Reset the peripheral to discard stale data state and FIFO registers.
@@ -291,41 +291,41 @@ static void reset_sd_card_storage(void)
     if(FATFS_UnLinkDriver(SDPath) != 0U)
     {
         retSD = 1U;
-        LOGE("SD", "FatFs driver unlink failed");
+        LOGE("SD", "FatFs驱动解除链接失败");
         return;
     }
 
     retSD = FATFS_LinkDriver(&SD_Driver, SDPath);
     if(retSD != 0U)
-        LOGE("SD", "FatFs driver relink failed: %u", retSD);
+        LOGE("SD", "FatFs驱动重新链接失败: %u", retSD);
 }
 
 static void print_sd_card_tree(void)
 {
     if(retSD != 0U)
     {
-        LOGE("SD", "FatFs driver is unavailable: %u", retSD);
+        LOGE("SD", "FatFs驱动不可用: %u", retSD);
         return;
     }
 
-    LOGI("SD", "Mounting FAT32 volume");
+    LOGI("SD", "正在挂载FAT32文件系统");
     FRESULT result = f_mount(&SDFatFS, s_sd_volume, 1U);
     if(result != FR_OK)
     {
-        LOGE("SD", "Mount failed, FatFs=%d", (int)result);
+        LOGE("SD", "挂载失败, FatFs=%d", (int)result);
         return;
     }
 
     LOGI("SD", "SD:/");
     result = print_directory_tree(s_tree_path, SD_TREE_PATH_CAPACITY, 0U);
     if(result == FR_OK)
-        LOGI("SD", "Directory tree completed");
+        LOGI("SD", "目录树打印完成");
     else
-        LOGE("SD", "Directory traversal failed, FatFs=%d", (int)result);
+        LOGE("SD", "目录遍历失败, FatFs=%d", (int)result);
 
     const FRESULT unmount_result = f_mount(NULL, s_sd_volume, 1U);
     if(unmount_result != FR_OK)
-        LOGE("SD", "Unmount failed, FatFs=%d", (int)unmount_result);
+        LOGE("SD", "卸载失败, FatFs=%d", (int)unmount_result);
 }
 
 static bool sd_card_is_present(void)
@@ -339,7 +339,7 @@ static void sd_card_monitor_task(void *argument)
 
     if(retSD != 0U)
     {
-        LOGE("SD", "FatFs driver link failed: %u", retSD);
+        LOGE("SD", "FatFs驱动链接失败: %u", retSD);
         s_sd_card_task_handle = NULL;
         vTaskDelete(NULL);
         return;
@@ -351,12 +351,12 @@ static void sd_card_monitor_task(void *argument)
 
     if(stable_present)
     {
-        LOGI("SD", "SD card present at startup");
+        LOGI("SD", "启动时检测到SD卡");
         print_sd_card_tree();
     }
     else
     {
-        LOGI("SD", "No SD card, waiting for insertion");
+        LOGI("SD", "未检测到SD卡, 等待插入");
     }
 
     while(true)
@@ -387,15 +387,15 @@ static void sd_card_monitor_task(void *argument)
 
         if(stable_present)
         {
-            LOGI("SD", "SD card inserted");
+            LOGI("SD", "SD卡已插入");
             print_sd_card_tree();
         }
         else
         {
-            LOGW("SD", "SD card removed");
+            LOGW("SD", "SD卡已拔出");
             const FRESULT unmount_result = f_mount(NULL, s_sd_volume, 1U);
             if(unmount_result != FR_OK)
-                LOGE("SD", "Unmount after removal failed, FatFs=%d", (int)unmount_result);
+                LOGE("SD", "拔卡后卸载失败, FatFs=%d", (int)unmount_result);
 
             reset_sd_card_storage();
         }
@@ -406,7 +406,7 @@ void sd_card_monitor_start(void)
 {
     if(s_sd_card_task_handle != NULL)
     {
-        LOGW("SD", "SD card monitor is already running");
+        LOGW("SD", "SD卡监测任务已运行");
         return;
     }
 
@@ -415,6 +415,6 @@ void sd_card_monitor_start(void)
     if(result != pdPASS)
     {
         s_sd_card_task_handle = NULL;
-        LOGE("SD", "Failed to create SD card monitor task");
+        LOGE("SD", "创建SD卡监测任务失败");
     }
 }
