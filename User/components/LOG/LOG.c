@@ -1,0 +1,204 @@
+#include "LOG.h"
+#include <stdio.h>
+#include <string.h>
+#include <stdarg.h>
+#include "FreeRTOS.h"
+#include "queue.h"
+#include "semphr.h"
+#include "task.h"
+#include "usart.h"
+
+#define ANSI_RESET  "\033[0m"
+#define ANSI_COLOR  "\033[0;%sm"
+
+#define LOG_MEM_POOL_SIZE   16
+
+#define LOG_UART &huart1
+
+static log_level_t s_log_level = LOG_VERBOSE;
+
+static xQueueHandle log_queue = NULL;   //业务代码发送日志的接口
+static xQueueHandle log_mem_pool_queue = NULL;  //存放内存池指针的队列
+static xSemaphoreHandle log_uart_sem = NULL;   //USART/DMA信号量
+static TaskHandle_t log_task_handle = NULL;
+
+static log_data_t log_mem_pool[LOG_MEM_POOL_SIZE];
+
+void log_free_buffer(log_data_t *buffer)
+{
+    if(buffer != NULL && log_mem_pool_queue != NULL)
+    {
+        xQueueSend(log_mem_pool_queue, &buffer, 0);
+    }
+}
+
+static uint32_t get_time_ms(void)
+{
+    return xTaskGetTickCount();
+}
+
+static void log_get_level_info(log_level_t level, char *level_char, const char **color)
+{
+    switch(level)
+    {
+        case LOG_ERROR:
+            *level_char = 'E';
+            *color = "31";
+            break;
+        case LOG_WARN:
+            *level_char = 'W';
+            *color = "33";
+            break;
+        case LOG_INFO:
+            *level_char = 'I';
+            *color = "32";
+            break;
+        case LOG_DEBUG:
+            *level_char = 'D';
+            *color = "39";
+            break;
+        default:
+            *level_char = 'V';
+            *color = "90";
+            break;
+    }
+}
+
+static int log_format_message(char *raw, const char *color, char level_char, uint32_t ts, const char *tag,
+                              const char *format, va_list args)
+{
+    int offset = 0;
+    static const char reset_str[] = "\033[0m\n";
+    static const int reserve_len = sizeof(reset_str) - 1; // 编译期计算，替代代价较高的 strlen
+    static const int max_len_for_text = LOG_RAW_MAX_LEN - reserve_len - 1;
+
+    int n = snprintf(raw + offset, max_len_for_text - offset,
+                     "\033[0;%sm%c (%lu) %s: ",
+                     color, level_char, ts, tag); //拼接颜色转义代码、日志等级、时间、tag
+    if(n < 0)
+        n = 0;
+    if(n >= max_len_for_text - offset)
+        n = max_len_for_text - offset;
+    offset += n;
+
+    if(offset < max_len_for_text)
+    {
+        n = vsnprintf(raw + offset, max_len_for_text - offset, format, args); //打印格式化字符串到缓冲区
+        if(n < 0)
+            n = 0;
+        if(n >= max_len_for_text - offset)
+            n = max_len_for_text - offset;  //防止截断导致无法转回正常颜色
+        offset += n;
+    }
+
+    memcpy(raw + offset, reset_str, reserve_len + 1);
+    offset += reserve_len;
+
+    return offset;
+}
+
+void log_set_level(log_level_t level)
+{
+    s_log_level = level;
+}
+
+log_data_t *log_alloc_buffer(void)
+{
+    log_data_t *buffer = NULL;
+
+    if(log_mem_pool_queue == NULL || xQueueReceive(log_mem_pool_queue, &buffer, 0) != pdTRUE)
+        return NULL;
+
+    buffer->len = 0;
+    buffer->data[0] = '\0';
+    return buffer;
+}
+
+bool log_send_buffer(log_data_t *buffer)
+{
+    if(buffer == NULL)
+        return false;
+
+    if(log_queue == NULL || buffer->len == 0 || buffer->len > LOG_RAW_MAX_LEN)
+    {
+        log_free_buffer(buffer);
+        return false;
+    }
+
+    if(xQueueSend(log_queue, &buffer, 0) != pdTRUE)
+    {
+        log_free_buffer(buffer);
+        return false;
+    }
+
+    return true;
+}
+
+void log_write(log_level_t level, const char *tag, const char *format, ...)
+{
+    if(level > s_log_level || log_queue == NULL)
+        return;
+
+    const char *color;
+    char level_char;
+    log_get_level_info(level, &level_char, &color);
+
+    log_data_t *log_buffer = log_alloc_buffer();
+    if(log_buffer == NULL)
+        return;
+
+    uint32_t ts = get_time_ms();
+    va_list args;
+    va_start(args, format);
+    log_buffer->len = log_format_message(log_buffer->data, color, level_char, ts, tag, format, args);
+    va_end(args);
+
+    log_send_buffer(log_buffer);
+}
+
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart)
+{
+    static BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    if(huart == LOG_UART)
+    {
+        vTaskNotifyGiveFromISR(log_task_handle, &xHigherPriorityTaskWoken);  //中断中通知发送任务
+    }
+}
+
+static void log_send_task(void *args)
+{
+    log_data_t *recv_buf_ptr = NULL;
+    while(1)
+    {
+        if(xQueueReceive(log_queue, &recv_buf_ptr, portMAX_DELAY) == pdTRUE)  //等待日志
+        {
+            if(HAL_UART_Transmit_DMA(LOG_UART, (const uint8_t *)recv_buf_ptr->data, recv_buf_ptr->len) != HAL_OK)
+            {
+                // 如果失败，手动释放内存并继续循环，否则会死锁
+                log_free_buffer(recv_buf_ptr);
+                continue;
+            }
+            ulTaskNotifyTake(pdTRUE, portMAX_DELAY); //等待DMA传输完成
+            log_free_buffer(recv_buf_ptr);  //完成后释放内存块
+        }
+    }
+}
+
+void log_init(log_level_t level)
+{
+    log_set_level(level);
+    log_mem_pool_queue = xQueueCreate(LOG_MEM_POOL_SIZE, sizeof(log_data_t*));
+    for(uint8_t i = 0; i < LOG_MEM_POOL_SIZE; i++)
+    {
+        log_data_t *ptr = &log_mem_pool[i];
+        xQueueSend(log_mem_pool_queue, &ptr, portMAX_DELAY); //将内存池指针放入队列
+    }
+
+    log_queue = xQueueCreate(LOG_MEM_POOL_SIZE, sizeof(log_data_t*));
+    log_uart_sem = xSemaphoreCreateBinary();
+    xSemaphoreGive(log_uart_sem);
+
+    xTaskCreate(log_send_task, "log_send_task", 256, NULL, 12, &log_task_handle);
+
+    LOGI("LOG", "日志服务已启动");
+}
