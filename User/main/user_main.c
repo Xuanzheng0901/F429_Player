@@ -18,5 +18,5 @@ void app_main(void)
 {
     log_init(LOG_INFO);
     xTaskCreate(led_blink_task, "LED", 512, NULL, 6, NULL);
-    sd_card_tree_test_start();
+    sd_card_monitor_start();
 }

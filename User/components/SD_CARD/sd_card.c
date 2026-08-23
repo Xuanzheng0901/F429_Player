@@ -12,18 +12,22 @@
 #include "LOG.h"
 #include "bsp_driver_sd.h"
 #include "fatfs.h"
+#include "sdio.h"
 
-#define SD_TREE_TASK_STACK_DEPTH 1024U
-#define SD_TREE_TASK_PRIORITY    10U
-#define SD_TREE_MAX_DEPTH        8U
-#define SD_TREE_PATH_CAPACITY    512U
-#define SD_TREE_NAME_UTF8_SIZE   192U
-#define SD_TREE_LINE_SIZE        224U
+#define SD_CARD_TASK_STACK_DEPTH       1024U
+#define SD_CARD_TASK_PRIORITY          10U
+#define SD_CARD_POLL_PERIOD_MS         50U
+#define SD_CARD_DEBOUNCE_SAMPLE_COUNT  3U
+#define SD_TREE_MAX_DEPTH              8U
+#define SD_TREE_PATH_CAPACITY          512U
+#define SD_TREE_NAME_UTF8_SIZE         192U
+#define SD_TREE_LINE_SIZE              224U
 
 static const TCHAR s_sd_volume[] = {(TCHAR)'0', (TCHAR)':', 0};
 static TCHAR s_tree_path[SD_TREE_PATH_CAPACITY] = {(TCHAR)'0', (TCHAR)':', (TCHAR)'/', 0};
 static DIR s_directory_stack[SD_TREE_MAX_DEPTH];
 static FILINFO s_file_info_stack[SD_TREE_MAX_DEPTH];
+static TaskHandle_t s_sd_card_task_handle = NULL;
 
 static size_t tchar_length(const TCHAR *text)
 {
@@ -215,28 +219,49 @@ static FRESULT print_directory_tree(TCHAR *path, size_t capacity, uint32_t depth
     return result == FR_OK ? close_result : result;
 }
 
-static void sd_card_tree_test_task(void *argument)
+static void reset_sd_card_storage(void)
 {
-    (void)argument;
+    if(HAL_SD_DeInit(&hsd) != HAL_OK)
+        LOGW("SD", "HAL SD deinitialization failed");
 
+    // // The generated MSP deinitialization only disables the SDIO clock.
+    // // Reset the peripheral to discard stale data state and FIFO registers.
+    __HAL_RCC_SDIO_FORCE_RESET();
+    // __DSB();
+    __HAL_RCC_SDIO_RELEASE_RESET();
+    // __DSB();
+    //
+    HAL_NVIC_ClearPendingIRQ(SDIO_IRQn);
+    HAL_NVIC_ClearPendingIRQ(DMA2_Stream3_IRQn);
+
+    MX_SDIO_SD_Init();
+
+    if(FATFS_UnLinkDriver(SDPath) != 0U)
+    {
+        retSD = 1U;
+        LOGE("SD", "FatFs driver unlink failed");
+        return;
+    }
+
+    retSD = FATFS_LinkDriver(&SD_Driver, SDPath);
+    if(retSD != 0U)
+        LOGE("SD", "FatFs driver relink failed: %u", retSD);
+}
+
+static void print_sd_card_tree(void)
+{
     if(retSD != 0U)
     {
-        LOGE("SD", "FatFs driver link failed: %u", retSD);
-        vTaskDelete(NULL);
+        LOGE("SD", "FatFs driver is unavailable: %u", retSD);
+        return;
     }
 
-    if(BSP_SD_IsDetected() != SD_PRESENT)
-    {
-        LOGW("SD", "No SD card detected, PG14 should be low after insertion");
-        vTaskDelete(NULL);
-    }
-
-    LOGI("SD", "SD card detected, mounting FAT32 volume");
+    LOGI("SD", "Mounting FAT32 volume");
     FRESULT result = f_mount(&SDFatFS, s_sd_volume, 1U);
     if(result != FR_OK)
     {
         LOGE("SD", "Mount failed, FatFs=%d", (int)result);
-        vTaskDelete(NULL);
+        return;
     }
 
     LOGI("SD", "0:/");
@@ -249,14 +274,95 @@ static void sd_card_tree_test_task(void *argument)
     const FRESULT unmount_result = f_mount(NULL, s_sd_volume, 1U);
     if(unmount_result != FR_OK)
         LOGE("SD", "Unmount failed, FatFs=%d", (int)unmount_result);
-
-    vTaskDelete(NULL);
 }
 
-void sd_card_tree_test_start(void)
+static bool sd_card_is_present(void)
 {
-    const BaseType_t result = xTaskCreate(sd_card_tree_test_task, "sd_tree", SD_TREE_TASK_STACK_DEPTH,
-                                          NULL, SD_TREE_TASK_PRIORITY, NULL);
+    return BSP_SD_IsDetected() == SD_PRESENT;
+}
+
+static void sd_card_monitor_task(void *argument)
+{
+    (void)argument;
+
+    if(retSD != 0U)
+    {
+        LOGE("SD", "FatFs driver link failed: %u", retSD);
+        s_sd_card_task_handle = NULL;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    bool stable_present = sd_card_is_present();
+    bool candidate_present = stable_present;
+    uint32_t candidate_sample_count = 0U;
+
+    if(stable_present)
+    {
+        LOGI("SD", "SD card present at startup");
+        print_sd_card_tree();
+    }
+    else
+    {
+        LOGI("SD", "No SD card, waiting for insertion");
+    }
+
+    while(true)
+    {
+        vTaskDelay(pdMS_TO_TICKS(SD_CARD_POLL_PERIOD_MS));
+
+        const bool sampled_present = sd_card_is_present();
+        if(sampled_present == stable_present)
+        {
+            candidate_present = stable_present;
+            candidate_sample_count = 0U;
+            continue;
+        }
+
+        if(sampled_present != candidate_present)
+        {
+            candidate_present = sampled_present;
+            candidate_sample_count = 1U;
+            continue;
+        }
+
+        candidate_sample_count++;
+        if(candidate_sample_count < SD_CARD_DEBOUNCE_SAMPLE_COUNT)
+            continue;
+
+        stable_present = candidate_present;
+        candidate_sample_count = 0U;
+
+        if(stable_present)
+        {
+            LOGI("SD", "SD card inserted");
+            print_sd_card_tree();
+        }
+        else
+        {
+            LOGW("SD", "SD card removed");
+            const FRESULT unmount_result = f_mount(NULL, s_sd_volume, 1U);
+            if(unmount_result != FR_OK)
+                LOGE("SD", "Unmount after removal failed, FatFs=%d", (int)unmount_result);
+
+            reset_sd_card_storage();
+        }
+    }
+}
+
+void sd_card_monitor_start(void)
+{
+    if(s_sd_card_task_handle != NULL)
+    {
+        LOGW("SD", "SD card monitor is already running");
+        return;
+    }
+
+    const BaseType_t result = xTaskCreate(sd_card_monitor_task, "sd_card", SD_CARD_TASK_STACK_DEPTH,
+                                           NULL, SD_CARD_TASK_PRIORITY, &s_sd_card_task_handle);
     if(result != pdPASS)
-        LOGE("SD", "Failed to create SD card tree test task");
+    {
+        s_sd_card_task_handle = NULL;
+        LOGE("SD", "Failed to create SD card monitor task");
+    }
 }
